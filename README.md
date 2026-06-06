@@ -121,6 +121,25 @@ $env:PYTHONPATH = "."; uvicorn app.main:app --reload
 - **`POST /api/transcript/parse`**: 성적표 PDF에서 이수 내역 자동 추출
 - **`POST /api/timetable/parse`**: 시간표 PDF에서 수강 계획 자동 추출
 - **`POST /api/graduation/evaluate`**: 통합 졸업 사정 분석 및 맞춤 과목 추천
+- **`POST /api/agent/graduation/ask`**: 학년도별 졸업요건 PDF를 RAG로 검색하고 Gemini로 근거 기반 답변 생성
+
+### 졸업요건 AI 에이전트
+`.env`에 `GEMINI_API_KEY`를 설정한 뒤 아래처럼 질문할 수 있습니다.
+
+```bash
+curl -X POST http://localhost:8000/api/agent/graduation/ask \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question": "컴퓨터공학과 2025학년도 기본전공 졸업학점은 몇 학점이야?",
+    "year": "2025",
+    "department": "컴퓨터공학과",
+    "top_k": 5
+  }'
+```
+
+선택 환경변수:
+- `GEMINI_MODEL`: 답변 생성 모델. 기본값 `gemini-3.5-flash`
+- `GEMINI_EMBEDDING_MODEL`: 검색 embedding 모델. 기본값 `gemini-embedding-2`
 
 ---
 
