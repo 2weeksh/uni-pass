@@ -42,6 +42,24 @@ class LLMClient:
             return "gemini"
         return None
 
+    @property
+    def embeddings_enabled(self) -> bool:
+        """임베딩 가능 여부. 스키마가 VECTOR(1536) 고정이라 OpenAI(text-embedding-3-small)만 사용."""
+        return bool(self.api_key)
+
+    def embed(self, text: str) -> Optional[list]:
+        """텍스트를 1536차원 임베딩 벡터로 변환. 키 없거나 오류 시 None (→ tsvector 폴백)."""
+        if not self.api_key or not text:
+            return None
+        try:
+            resp = self._get_client().embeddings.create(
+                model=settings.EMBEDDING_MODEL,
+                input=text,
+            )
+            return resp.data[0].embedding
+        except Exception:
+            return None
+
     def _get_client(self):
         if self._client is None:
             # 지연 임포트: openai 미설치/키 없음 환경에서도 모듈 임포트는 가능하게.

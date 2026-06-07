@@ -13,6 +13,8 @@ class Settings:
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    # RAG 의미검색용 임베딩 모델. text-embedding-3-small = 1536차원(스키마 VECTOR(1536)과 일치).
+    EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
     @property
     def llm_enabled(self) -> bool:

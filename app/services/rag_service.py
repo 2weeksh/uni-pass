@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.services.rules import GraduationRuleSet
+from app.services.llm_client import LLMClient
 from app.utils.department import normalize_department_name
 
 
@@ -54,10 +55,15 @@ def _keywords_for(deficiency_key: str, department: Optional[str] = None) -> List
 
 
 class RagService:
-    """regulations 테이블을 tsvector로 검색해 관련 규정 스니펫을 반환한다."""
+    """regulations 테이블을 의미검색(pgvector) 우선, tsvector 폴백으로 검색한다.
 
-    def __init__(self, db: Session):
+    - 임베딩 가능(OPENAI_API_KEY 존재) 시: 쿼리를 임베딩해 코사인 유사도로 의미검색.
+    - 임베딩 불가/결과 없음/임베딩 컬럼 미구성 시: 기존 tsvector 키워드 검색으로 자동 폴백.
+    """
+
+    def __init__(self, db: Session, llm: Optional[LLMClient] = None):
         self.db = db
+        self.llm = llm or LLMClient()
 
     def search(
         self,
@@ -129,6 +135,62 @@ class RagService:
             self.db.rollback()
             return []
 
+    def search_semantic(
+        self,
+        query_text: str,
+        major: Optional[str] = None,
+        top_k: int = 4,
+    ) -> List[dict]:
+        """쿼리 텍스트를 임베딩해 코사인 유사도(pgvector)로 의미검색한다.
+
+        임베딩 비활성/실패, embedding 컬럼 미구성, 결과 없음, 예외 → 모두 빈 리스트.
+        호출 측은 빈 결과면 tsvector 키워드 검색으로 폴백한다.
+        """
+        if not query_text or not self.llm.embeddings_enabled:
+            return []
+
+        vec = self.llm.embed(query_text)
+        if not vec:
+            return []
+        # pgvector 리터럴 형식: "[0.1,0.2,...]" → SQL에서 ::vector 캐스팅
+        vec_literal = "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
+
+        major_filter = ""
+        params: dict = {"qvec": vec_literal, "top_k": top_k}
+        normalized_major = normalize_department_name(major)
+        if normalized_major:
+            major_filter = "AND (r.major IS NULL OR r.major IN (:major, :normalized_major))"
+            params["major"] = major
+            params["normalized_major"] = normalized_major
+
+        sql = text(f"""
+            SELECT
+                r.title,
+                LEFT(r.content, 240) AS snippet,
+                r.source_tag,
+                1 - (r.embedding <=> CAST(:qvec AS vector)) AS score
+            FROM regulations r
+            WHERE r.is_active = TRUE
+              AND r.embedding IS NOT NULL
+              {major_filter}
+            ORDER BY r.embedding <=> CAST(:qvec AS vector)
+            LIMIT :top_k
+        """)
+
+        try:
+            rows = self.db.execute(sql, params).fetchall()
+            return [
+                {
+                    "title": row.title,
+                    "snippet": row.snippet,
+                    "source_tag": row.source_tag,
+                }
+                for row in rows
+            ]
+        except Exception:
+            self.db.rollback()
+            return []
+
     def search_for_deficiencies(
         self,
         deficiency_map: dict,
@@ -150,14 +212,50 @@ class RagService:
         major: Optional[str] = None,
         top_k: int = 3,
     ) -> str:
-        """LLM 프롬프트에 삽입할 규정 컨텍스트 문자열을 생성한다.
+        """LLM 프롬프트에 삽입할 규정 컨텍스트 문자열을 생성한다 (tsvector 키워드 기반).
 
         검색 결과가 없으면 빈 문자열 반환 → 프롬프트에서 규정 섹션 자동 생략.
         """
         results = self.search(query_terms, major=major, top_k=top_k)
+        return self._format_context(results)
+
+    def build_context_for_deficiencies(
+        self,
+        deficiency_map: dict,
+        department: Optional[str] = None,
+    ) -> str:
+        """deficiency_map 전체를 대상으로 컨텍스트 문자열을 반환한다.
+
+        1) 의미검색(pgvector) 우선 시도. 2) 결과 없으면 tsvector 키워드 검색으로 폴백.
+        """
+        # 1) 의미검색
+        query_text = self._deficiency_query_text(deficiency_map, department)
+        results = self.search_semantic(query_text, major=department, top_k=4)
+
+        # 2) 폴백: tsvector 키워드 검색
+        if not results:
+            all_terms: List[str] = []
+            for key in deficiency_map:
+                all_terms.extend(_keywords_for(key, department))
+            seen: set = set()
+            unique = [t for t in all_terms if not (t in seen or seen.add(t))]
+            results = self.search(unique, major=department, top_k=4)
+
+        return self._format_context(results)
+
+    @staticmethod
+    def _deficiency_query_text(deficiency_map: dict, department: Optional[str] = None) -> str:
+        """부족 영역 맵을 임베딩용 자연어 쿼리 문자열로 변환한다."""
+        readable = [str(k).replace("_", " ") for k in deficiency_map]
+        dept = f" {department}" if department else ""
+        body = ", ".join(r for r in readable if r)
+        return f"졸업 부족 영역{dept}: {body} 관련 학칙 규정 및 이수 기준".strip()
+
+    @staticmethod
+    def _format_context(results: List[dict]) -> str:
+        """검색 결과 스니펫 목록을 LLM 프롬프트용 문자열로 포맷. 없으면 빈 문자열."""
         if not results:
             return ""
-
         lines = ["[관련 학칙·규정]"]
         for r in results:
             tag = f" ({r['source_tag']})" if r.get("source_tag") else ""
@@ -166,16 +264,3 @@ class RagService:
             lines.append(f"■ {r['title']}{tag}")
             lines.append(f"  {snippet}")
         return "\n".join(lines)
-
-    def build_context_for_deficiencies(
-        self,
-        deficiency_map: dict,
-        department: Optional[str] = None,
-    ) -> str:
-        """deficiency_map 전체를 대상으로 검색해 컨텍스트 문자열을 반환한다."""
-        all_terms: List[str] = []
-        for key in deficiency_map:
-            all_terms.extend(_keywords_for(key, department))
-        seen: set = set()
-        unique = [t for t in all_terms if not (t in seen or seen.add(t))]
-        return self.build_context(unique, major=department, top_k=4)
