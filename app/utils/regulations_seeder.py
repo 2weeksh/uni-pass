@@ -6,7 +6,8 @@
 
 idempotent: (title, source_tag) 중복이면 skip.
 content_vector는 DB GENERATED ALWAYS 컬럼이라 insert 시 포함하지 않는다.
-embedding(VECTOR) 컬럼은 pgvector 미설치이므로 건드리지 않는다.
+embedding(VECTOR(1536)) 컬럼은 시드 후 backfill_embeddings()로 채운다
+(OPENAI_API_KEY 없으면 자동 skip → tsvector 키워드 검색만 사용).
 """
 
 import glob
@@ -15,8 +16,11 @@ import os
 import argparse
 from datetime import date
 
+from sqlalchemy import text
+
 from app.core.database import SessionLocal
 from app.models.db import Regulation
+from app.services.llm_client import LLMClient
 from app.services.parser import RequirementParser
 
 
@@ -121,6 +125,47 @@ def seed_from_pdfs(db, pdf_dir: str) -> int:
     return count
 
 
+def backfill_embeddings(db, llm: LLMClient = None) -> int:
+    """embedding이 비어있는 규정에 대해 임베딩을 생성·저장한다. 저장 건수 반환.
+
+    - OPENAI_API_KEY 없으면 0건 반환(의미검색 비활성 → tsvector 폴백).
+    - pgvector 미설치/embedding 컬럼 부재 등 DB 오류 시에도 graceful하게 0 처리.
+    """
+    llm = llm or LLMClient()
+    if not llm.embeddings_enabled:
+        print("  임베딩 backfill: 건너뜀 (OPENAI_API_KEY 없음 → tsvector 검색만 사용)")
+        return 0
+
+    try:
+        rows = db.execute(text(
+            "SELECT id, title, content FROM regulations "
+            "WHERE embedding IS NULL AND is_active = TRUE"
+        )).fetchall()
+    except Exception:
+        db.rollback()
+        print("  임베딩 backfill: embedding 컬럼 조회 실패 (pgvector/스키마 확인 필요) → 건너뜀")
+        return 0
+
+    count = 0
+    for row in rows:
+        vec = llm.embed(f"{row.title}\n{row.content}")
+        if not vec:
+            continue
+        vec_literal = "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
+        try:
+            db.execute(
+                text("UPDATE regulations SET embedding = CAST(:v AS vector) WHERE id = :id"),
+                {"v": vec_literal, "id": row.id},
+            )
+            count += 1
+        except Exception:
+            db.rollback()
+            print("  임베딩 backfill: UPDATE 실패 → 중단")
+            return count
+    db.commit()
+    return count
+
+
 def run(skip_pdfs: bool = False):
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
     json_path = os.path.join(base_dir, "data", "regulations_seed.json")
@@ -140,6 +185,8 @@ def run(skip_pdfs: bool = False):
         total = n1 + n2
         print(f"  합계: {total}건 삽입 (중복 skip 포함)")
         print(f"  현재 테이블 총 행 수: {db.query(Regulation).count()}")
+        n3 = backfill_embeddings(db)
+        print(f"  임베딩 backfill: {n3}건 생성 (의미검색용)")
     finally:
         db.close()
 

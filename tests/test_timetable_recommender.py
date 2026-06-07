@@ -25,6 +25,9 @@ def make_offering(code, credits, key, schedule, section="01", building=None):
 
 
 class FakeLLM:
+    # 임베딩은 비활성으로 두어 공유 RagService가 의미검색(네트워크)을 타지 않게 한다.
+    embeddings_enabled = False
+
     def __init__(self, enabled=True, result=None):
         self.enabled = enabled
         self._result = result
@@ -33,6 +36,9 @@ class FakeLLM:
     def complete_json(self, system, user):
         self.calls += 1
         return self._result
+
+    def embed(self, _text):
+        return None
 
 
 @pytest.fixture

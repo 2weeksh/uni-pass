@@ -210,5 +210,11 @@ __marimo__/
 test_data/*.pdf
 test_data/*.jpg
 *.json
+!data/regulations_seed.json
 check_missing.py
 analyze_excel.py
+
+
+# 플랜파일
+*_plan.md
+plan_*.md

@@ -62,7 +62,8 @@ class TimetableRecommenderService:
         self.db = db
         self.llm = llm or LLMClient()
         self.recommender = RecommenderService(db)
-        self.rag = RagService(db)
+        # RAG는 추천기와 동일한 LLM 인스턴스를 공유한다 (임베딩/생성 키 일원화).
+        self.rag = RagService(db, llm=self.llm)
 
     # ------------------------------------------------------------------ public
     def recommend(

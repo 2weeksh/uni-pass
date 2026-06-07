@@ -169,8 +169,10 @@ CREATE TABLE regulations (
 );
 
 CREATE INDEX idx_reg_fts ON regulations USING GIN(content_vector);
--- Enable after enough rows are inserted and pgvector is installed:
--- CREATE INDEX idx_reg_vec ON regulations USING ivfflat (embedding vector_cosine_ops);
+-- 의미검색용 임베딩은 regulations_seeder.backfill_embeddings()가 채운다.
+-- 행이 수십 건 규모면 인덱스 없이도 코사인 정렬(embedding <=> q)이 충분히 빠르다.
+-- 대량 적재 후 성능이 필요하면 backfill 완료 뒤 아래 인덱스를 생성한다(lists는 데이터 규모에 맞춰 조정):
+-- CREATE INDEX idx_reg_vec ON regulations USING ivfflat (embedding vector_cosine_ops) WITH (lists = 10);
 
 COMMENT ON TABLE regulations IS 'AI Agent RAG 검색 대상 학칙·규정 원문';
 COMMENT ON COLUMN regulations.embedding IS 'OpenAI / 사내 임베딩 모델 벡터 (pgvector 확장 필요)';
